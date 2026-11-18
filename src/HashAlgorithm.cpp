@@ -17,6 +17,11 @@
 #include <openssl/md5.h>
 #include <openssl/sha.h>
 #include <openssl/ripemd.h>
+
+#include <argon2.h>
+#include <cstdio>
+#include <cstdlib>
+
 #ifdef _WIN32
 	#pragma comment(lib, "libeay32.lib")
 #endif
@@ -126,4 +131,19 @@ void HashAudible(unsigned char* pPlain, int nPlainLen, unsigned char* pHash)
 
 void HashSHA256(unsigned char* pPlain,int nPlainLen,unsigned char* pHash){
 	SHA256(pPlain, nPlainLen, pHash);
+}
+
+void HashArgon2id(unsigned char* pPlain,int nPlainLen,unsigned char* pHash){
+	constexpr uint32_t t_cost = 2;
+	constexpr uint32_t m_cost = 4096; // KiB = 4 MiB
+	constexpr uint32_t parallelism = 1;
+
+	static const unsigned char salt[16] = {'M','I','R','A','G','E','-','T','E','S','T','-','0','0','0','1'};
+
+	int rc = argon2id_hash_raw(t_cost,m_cost,parallelism,pPlain,static_cast<size_t>(nPlainLen),salt,sizeof(salt),pHash,32);
+
+	if (rc != ARGON2_OK) {
+		std::fprintf(stderr, "Argon2id: %s\n",argon2_error_message(rc));
+		std::abort();
+	}
 }

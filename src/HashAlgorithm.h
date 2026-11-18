@@ -21,5 +21,6 @@ void HashRIPEMD160(unsigned char* pPlain, int nPlainLen, unsigned char* pHash);
 void HashAudible(unsigned char* pPlain, int nPlainLen, unsigned char* pHash);
 
 void HashSHA256(unsigned char* pPlain, int nPlainLen, unsigned char* pHash);
+void HashArgon2id(unsigned char* pPlain, int nPlainLen, unsigned char* pHash);
 
 #endif
