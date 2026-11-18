@@ -1,1 +1,8 @@
 .vs/
+*.o
+*.rt
+*.rtc
+/src/rtgen
+/src/rcrack
+/src/rtdump
+/src/rtsort
