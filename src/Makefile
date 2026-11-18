@@ -15,7 +15,7 @@ RainbowCrack.o: RainbowCrack.cpp
 	$(CXX) -c RainbowCrack.cpp -I/usr/local/include -O3 -o RainbowCrack.o
 
 rtgen: $(OBJS)
-	$(CXX) -O3 $(LDFLAGS) Public.o ChainWalkContext.o HashAlgorithm.o HashRoutine.o RainbowTableGenerate.o -lssl -lcrypto -largon2 -o rtgen
+	$(CXX) -O3 -pthread $(LDFLAGS) Public.o ChainWalkContext.o HashAlgorithm.o HashRoutine.o RainbowTableGenerate.o -lssl -lcrypto -largon2 -o rtgen
 
 rtdump: $(OBJS)
 	$(CXX) $(LDFLAGS) Public.o ChainWalkContext.o HashAlgorithm.o HashRoutine.o RainbowTableDump.o -lssl -lcrypto -largon2 -o rtdump

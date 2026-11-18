@@ -19,6 +19,18 @@
 #include <algorithm>
 #include "ChainWalkContext.h"
 
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <chrono>
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstdint>
+#include <numeric>
+#include <stdexcept>
+
 void Usage()
 {
 	Logo();
@@ -108,6 +120,29 @@ void Bench(string sHashRoutineName, string sCharsetName, int nPlainLenMin, int n
 	}
 }
 
+static uint64_t deterministicStart(
+	uint64_t chainId,
+	uint64_t seed,
+	uint64_t space
+) {
+	if (space == 0 || chainId >= space)
+		throw std::out_of_range("Invalid chain index");
+
+	uint64_t offset = seed % space;
+	uint64_t stride = (seed % (space - 1)) + 1;
+
+	while (std::gcd(stride, space) != 1) {
+		stride = stride % (space - 1) + 1;
+	}
+
+	return static_cast<uint64_t>(
+		(static_cast<__uint128_t>(chainId) * stride
+			+ offset) % space
+		);
+}
+
+
+
 int main(int argc, char* argv[])
 {
 	if (argc == 7)
@@ -119,11 +154,34 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	if (argc != 9)
+	if (argc != 9 && argc != 11)
 	{
 		Usage();
 		return 0;
 	}
+
+	int threadCount = 1;
+
+	if (argc == 11) {
+		if (strcmp(argv[9], "--threads") != 0) {
+			Usage();
+			return 1;
+		}
+
+		errno = 0;
+		char* end = nullptr;
+		long value = strtol(argv[10], &end, 10);
+
+		if (errno != 0 || end == argv[10] || *end != '\0'
+			|| value < 1 || value > 64) {
+			printf("Invalid thread count (1-64)\n");
+			return 1;
+		}
+
+		threadCount = static_cast<int>(value);
+	}
+
+	printf("Threads: %d\n", threadCount);
 
 	string sHashRoutineName  = argv[1];
 	string sCharsetName      = argv[2];
@@ -198,48 +256,103 @@ int main(int argc, char* argv[])
 		printf("continuing from interrupted precomputation...\n");
 	fseek(file, nDataLen, SEEK_SET);
 
-	// Generate rainbow table
-	printf("generating...\n");
-	CChainWalkContext cwc;
-	clock_t t1 = clock();
-	int i;
-	for (i = nDataLen / 16; i < nRainbowChainCount; i++)
+	// Generate rainbow table -  multithreaded
+
+	struct ChainRecord {
+		uint64 start;
+		uint64 end;
+	};
+
+	constexpr int BATCH_SIZE = 1024;
+
+	printf("generating with %d threads...\n", threadCount);
+
+	auto t0 = std::chrono::steady_clock::now();
+
+	for (int base = nDataLen / 16;
+		base < nRainbowChainCount;
+		base += BATCH_SIZE)
 	{
-		cwc.GenerateRandomIndex();
-		uint64 nIndex = cwc.GetIndex();
-		if (fwrite(&nIndex, 1, 8, file) != 8)
-		{
-			printf("disk write fail\n");
-			break;
+		const int count = std::min(
+			BATCH_SIZE, nRainbowChainCount - base
+		);
+
+		std::vector<ChainRecord> records(count);
+		std::atomic<int> next{ 0 };
+
+		auto worker = [&]() {
+			CChainWalkContext cwc;
+
+			while (true) {
+				int slot = next.fetch_add(1);
+
+				if (slot >= count)
+					break;
+
+				constexpr uint64_t SEED = 20261118ULL;
+
+				const uint64_t chainId =
+					static_cast<uint64_t>(base) + slot;
+
+				const uint64_t start = deterministicStart(
+					chainId,
+					SEED,
+					CChainWalkContext::GetPlainSpaceTotal()
+				);
+
+				cwc.SetIndex(start);
+				records[slot].start = start;
+
+				for (int pos = 0;
+					pos < nRainbowChainLen - 1;
+					++pos)
+				{
+					cwc.IndexToPlain();
+					cwc.PlainToHash();
+					cwc.HashToIndex(pos);
+				}
+
+				records[slot].end = cwc.GetIndex();
+			}
+			};
+
+		std::vector<std::thread> threads;
+		threads.reserve(threadCount);
+
+		for (int t = 0; t < threadCount; ++t)
+			threads.emplace_back(worker);
+
+		for (auto& t : threads)
+			t.join();
+
+		// Single writer: preserve the legacy .rt format
+		for (const auto& record : records) {
+			if (fwrite(&record.start, 1, 8, file) != 8 ||
+				fwrite(&record.end, 1, 8, file) != 8) {
+				fprintf(stderr, "disk write failure\n");
+				fclose(file);
+				return 1;
+			}
 		}
 
-		int nPos;
-		for (nPos = 0; nPos < nRainbowChainLen - 1; nPos++)
-		{
-			cwc.IndexToPlain();
-			cwc.PlainToHash();
-			cwc.HashToIndex(nPos);
-		}
+		int completed = base + count;
 
-		nIndex = cwc.GetIndex();
-		if (fwrite(&nIndex, 1, 8, file) != 8)
-		{
-			printf("disk write fail\n");
-			break;
-		}
+		auto elapsed = std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - t0
+		).count();
 
-		if ((i + 1) % 100000 == 0 || i + 1 == nRainbowChainCount)
-		{
-			clock_t t2 = clock();
-			int nSecond = (t2 - t1) / CLOCKS_PER_SEC;
-			printf("%d of %d rainbow chains generated (%d m %d s)\n", i + 1,
-																	  nRainbowChainCount,
-																	  nSecond / 60,
-																	  nSecond % 60);
-			t1 = clock();
-		}
+		printf(
+			"\r%d/%d chains | %.2f chains/s",
+			completed,
+			nRainbowChainCount,
+			(completed - static_cast<int>(nDataLen / 16))
+			/ std::max(elapsed, 1e-9)
+		);
+
+		fflush(stdout);
 	}
 
+	printf("\n");
 	// Close
 	fclose(file);
 
