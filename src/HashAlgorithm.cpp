@@ -123,3 +123,7 @@ void HashAudible(unsigned char* pPlain, int nPlainLen, unsigned char* pHash)
 	SHA1_Update(&ctx, hash2, 16);
 	SHA1_Final(pHash, &ctx);
 }
+
+void HashSHA256(unsigned char* pPlain,int nPlainLen,unsigned char* pHash){
+	SHA256(pPlain, nPlainLen, pHash);
+}

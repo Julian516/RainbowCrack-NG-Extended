@@ -28,6 +28,7 @@ CHashRoutine::CHashRoutine()
 	AddHashRoutine("sha1", HashSHA1, 20);
 	AddHashRoutine("ripemd160", HashRIPEMD160, 20);
 	AddHashRoutine("audible", HashAudible, 20);
+	AddHashRoutine("sha256", HashSHA256, 32);
 }
 
 CHashRoutine::~CHashRoutine()
