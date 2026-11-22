@@ -154,15 +154,16 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	if (argc != 9 && argc != 11)
+	if (argc != 9 && argc != 11 && argc != 13)
 	{
 		Usage();
 		return 0;
 	}
 
 	int threadCount = 1;
+	uint64_t startChain = 0;
 
-	if (argc == 11) {
+	if (argc >= 11) {
 		if (strcmp(argv[9], "--threads") != 0) {
 			Usage();
 			return 1;
@@ -172,13 +173,38 @@ int main(int argc, char* argv[])
 		char* end = nullptr;
 		long value = strtol(argv[10], &end, 10);
 
-		if (errno != 0 || end == argv[10] || *end != '\0'
+		if (errno || end == argv[10] || *end != '\0'
 			|| value < 1 || value > 64) {
-			printf("Invalid thread count (1-64)\n");
+			fprintf(stderr, "Invalid thread count\n");
 			return 1;
 		}
 
 		threadCount = static_cast<int>(value);
+	}
+
+	if (argc == 13) {
+		if (strcmp(argv[11], "--start-chain") != 0) {
+			Usage();
+			return 1;
+		}
+
+		if (argv[12][0] == '-') {
+			fprintf(stderr, "Invalid start-chain\n");
+			return 1;
+		}
+
+		errno = 0;
+		char* end = nullptr;
+		unsigned long long value = strtoull(
+			argv[12], &end, 10
+		);
+
+		if (errno || end == argv[12] || *end != '\0') {
+			fprintf(stderr, "Invalid start-chain\n");
+			return 1;
+		}
+
+		startChain = static_cast<uint64_t>(value);
 	}
 
 	printf("Threads: %d\n", threadCount);
@@ -216,6 +242,19 @@ int main(int argc, char* argv[])
 	}
 	CChainWalkContext::Dump();
 
+	const uint64_t space =
+		CChainWalkContext::GetPlainSpaceTotal();
+
+	if (nRainbowChainCount <= 0 || nRainbowChainLen <= 0 || startChain >= space || static_cast<uint64_t>(nRainbowChainCount)> space - startChain) {
+		fprintf(stderr,
+			"Invalid chain range: start=%llu count=%d space=%llu\n",
+			static_cast<unsigned long long>(startChain),
+			nRainbowChainCount,
+			static_cast<unsigned long long>(space));
+
+		return 1;
+	}
+
 	// Low priority
 #ifdef _WIN32
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
@@ -233,6 +272,33 @@ int main(int argc, char* argv[])
 													  nRainbowChainLen,
 													  nRainbowChainCount,
 													  sFileTitleSuffix.c_str());
+	if (argc == 13) {
+		char filename[256];
+
+		int written = snprintf(
+			filename, sizeof(filename),
+			"%s.start%llu",
+			szFileName,
+			static_cast<unsigned long long>(startChain)
+		);
+
+		if (written < 0 || written >= (int)sizeof(filename)) {
+			fprintf(stderr, "Filename too long\n");
+			return 1;
+		}
+
+		// Keep .rt as the final extension.
+		string name = szFileName;
+		name.insert(name.size() - 3,
+			".start" + std::to_string(startChain));
+
+		if (name.size() >= sizeof(szFileName)) {
+			fprintf(stderr, "Filename too long\n");
+			return 1;
+		}
+
+		strcpy(szFileName, name.c_str());
+	}
 
 	// Open file
 	fclose(fopen(szFileName, "a"));
@@ -291,8 +357,7 @@ int main(int argc, char* argv[])
 
 				constexpr uint64_t SEED = 20261118ULL;
 
-				const uint64_t chainId =
-					static_cast<uint64_t>(base) + slot;
+				const uint64_t chainId = startChain + static_cast<uint64_t>(base) + slot;
 
 				const uint64_t start = deterministicStart(
 					chainId,
