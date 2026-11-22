@@ -364,12 +364,17 @@ int main(int argc, char* argv[])
 
 	// One coverage bitmap per thread to avoid concurrent writes
 	std::vector<std::unique_ptr<CoverageBitmap>> coverageMasks;
+	std::vector<std::unique_ptr<CoverageBitmap>> hashedMasks;
 
 	if (coverageEnabled)
 	{
 		for (int t = 0; t < threadCount; ++t)
 		{
 			coverageMasks.emplace_back(
+				std::make_unique<CoverageBitmap>(space)
+			);
+
+			hashedMasks.emplace_back(
 				std::make_unique<CoverageBitmap>(space)
 			);
 		}
@@ -420,6 +425,7 @@ int main(int argc, char* argv[])
 					if (coverageEnabled)
 					{
 						coverageMasks[tid]->mark(cwc.GetIndex());
+                                            hashedMasks[tid]->mark(cwc.GetIndex());
 					}
 
 					cwc.IndexToPlain();
@@ -490,6 +496,18 @@ int main(int argc, char* argv[])
 		// Count distinct candidates
 		const uint64_t unique = globalCoverage.count();
 
+                CoverageBitmap globalHashed(space);
+                for (const auto& mask : hashedMasks)
+                    globalHashed.merge(*mask);
+
+                const uint64_t uniqueHashed = globalHashed.count();
+
+                if (uniqueHashed > unique) {
+                    fprintf(stderr, "Invalid hashed coverage count\n");
+                    fclose(file);
+                    return 1;
+                }
+
 		// Total visited positions, including revisits
 		const uint64_t visits =
 			static_cast<uint64_t>(nRainbowChainCount) *
@@ -509,7 +527,22 @@ int main(int argc, char* argv[])
 		}
 
 		// Display statistics
-		printf("\n=== COVERAGE STATISTICS ===\n");
+
+                const std::string hashedPath =
+                    std::string(szFileName) + ".hashed-coverage.bin";
+
+                if (!globalHashed.save(hashedPath)) {
+                    fprintf(stderr, "Failed to save hashed coverage bitmap\n");
+                    fclose(file);
+                    return 1;
+                }
+
+                printf("Unique hashed candidates : %llu\n",
+                    static_cast<unsigned long long>(uniqueHashed));
+
+                printf("Hashed coverage : %.6f%%\n",
+                    100.0 * static_cast<double>(uniqueHashed) /
+                    static_cast<double>(space));
 
 		printf("Total positions : %llu\n",
 			static_cast<unsigned long long>(visits));
