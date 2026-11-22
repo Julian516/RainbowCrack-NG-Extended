@@ -14,6 +14,7 @@
 	#include <unistd.h>
 #endif
 #include <time.h>
+#include "CoverageBitmap.h"
 
 #include <cstring>
 #include <algorithm>
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
+#include <memory>
 
 void Usage()
 {
@@ -154,60 +156,86 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	if (argc != 9 && argc != 11 && argc != 13)
+	// Validate mandatory arguments
+	if (argc < 9)
 	{
 		Usage();
-		return 0;
+		return 1;
 	}
 
+	// Optional arguments
 	int threadCount = 1;
 	uint64_t startChain = 0;
 
-	if (argc >= 11) {
-		if (strcmp(argv[9], "--threads") != 0) {
-			Usage();
+	bool startChainProvided = false;
+	bool coverageEnabled = false;
+
+	// Parse optional arguments
+	for (int i = 9; i < argc; ++i)
+	{
+		std::string option = argv[i];
+
+		if (option == "--coverage")
+		{
+			coverageEnabled = true;
+		}
+		else if (option == "--threads")
+		{
+			if (i + 1 >= argc)
+			{
+				fprintf(stderr, "Missing value for --threads\n");
+				return 1;
+			}
+
+			errno = 0;
+			char* end = nullptr;
+			long value = strtol(argv[++i], &end, 10);
+
+			if (errno || end == argv[i] || *end != '\0'
+				|| value < 1 || value > 64)
+			{
+				fprintf(stderr, "Invalid thread count\n");
+				return 1;
+			}
+
+			threadCount = static_cast<int>(value);
+		}
+		else if (option == "--start-chain")
+		{
+			if (i + 1 >= argc)
+			{
+				fprintf(stderr, "Missing value for --start-chain\n");
+				return 1;
+			}
+
+			const char* input = argv[++i];
+
+			if (input[0] == '-')
+			{
+				fprintf(stderr, "Invalid start-chain\n");
+				return 1;
+			}
+
+			errno = 0;
+			char* end = nullptr;
+
+			unsigned long long value = strtoull(input, &end, 10);
+
+			if (errno || end == input || *end != '\0')
+			{
+				fprintf(stderr, "Invalid start-chain\n");
+				return 1;
+			}
+
+			startChain = static_cast<uint64_t>(value);
+			startChainProvided = true;
+		}
+		else
+		{
+			fprintf(stderr, "Unknown option: %s\n", option.c_str());
 			return 1;
 		}
-
-		errno = 0;
-		char* end = nullptr;
-		long value = strtol(argv[10], &end, 10);
-
-		if (errno || end == argv[10] || *end != '\0'
-			|| value < 1 || value > 64) {
-			fprintf(stderr, "Invalid thread count\n");
-			return 1;
-		}
-
-		threadCount = static_cast<int>(value);
 	}
-
-	if (argc == 13) {
-		if (strcmp(argv[11], "--start-chain") != 0) {
-			Usage();
-			return 1;
-		}
-
-		if (argv[12][0] == '-') {
-			fprintf(stderr, "Invalid start-chain\n");
-			return 1;
-		}
-
-		errno = 0;
-		char* end = nullptr;
-		unsigned long long value = strtoull(
-			argv[12], &end, 10
-		);
-
-		if (errno || end == argv[12] || *end != '\0') {
-			fprintf(stderr, "Invalid start-chain\n");
-			return 1;
-		}
-
-		startChain = static_cast<uint64_t>(value);
-	}
-
-	printf("Threads: %d\n", threadCount);
 
 	string sHashRoutineName  = argv[1];
 	string sCharsetName      = argv[2];
@@ -272,27 +300,18 @@ int main(int argc, char* argv[])
 													  nRainbowChainLen,
 													  nRainbowChainCount,
 													  sFileTitleSuffix.c_str());
-	if (argc == 13) {
-		char filename[256];
+	if (startChainProvided)
+	{
+		// Insert the starting chain ID before the .rt extension
+		string name = szFileName;
 
-		int written = snprintf(
-			filename, sizeof(filename),
-			"%s.start%llu",
-			szFileName,
-			static_cast<unsigned long long>(startChain)
+		name.insert(
+			name.size() - 3,
+			".start" + std::to_string(startChain)
 		);
 
-		if (written < 0 || written >= (int)sizeof(filename)) {
-			fprintf(stderr, "Filename too long\n");
-			return 1;
-		}
-
-		// Keep .rt as the final extension.
-		string name = szFileName;
-		name.insert(name.size() - 3,
-			".start" + std::to_string(startChain));
-
-		if (name.size() >= sizeof(szFileName)) {
+		if (name.size() >= sizeof(szFileName))
+		{
 			fprintf(stderr, "Filename too long\n");
 			return 1;
 		}
@@ -312,6 +331,18 @@ int main(int argc, char* argv[])
 	// Check existing chains
 	unsigned int nDataLen = GetFileLen(file);
 	nDataLen = nDataLen / 16 * 16;
+
+	// Coverage must start from an empty rainbow table
+	if (coverageEnabled && nDataLen > 0)
+	{
+		fprintf(stderr,
+			"Error: --coverage requires an empty table.\n"
+			"Use a new file suffix to start a fresh generation.\n");
+
+		fclose(file);
+		return 1;
+	}
+
 	if (nDataLen == nRainbowChainCount * 16)
 	{
 		printf("precomputation of this rainbow table already finished\n");
@@ -331,6 +362,19 @@ int main(int argc, char* argv[])
 
 	constexpr int BATCH_SIZE = 1024;
 
+	// One coverage bitmap per thread to avoid concurrent writes
+	std::vector<std::unique_ptr<CoverageBitmap>> coverageMasks;
+
+	if (coverageEnabled)
+	{
+		for (int t = 0; t < threadCount; ++t)
+		{
+			coverageMasks.emplace_back(
+				std::make_unique<CoverageBitmap>(space)
+			);
+		}
+	}
+
 	printf("generating with %d threads...\n", threadCount);
 
 	auto t0 = std::chrono::steady_clock::now();
@@ -346,7 +390,7 @@ int main(int argc, char* argv[])
 		std::vector<ChainRecord> records(count);
 		std::atomic<int> next{ 0 };
 
-		auto worker = [&]() {
+		auto worker = [&](int tid){
 			CChainWalkContext cwc;
 
 			while (true) {
@@ -372,9 +416,21 @@ int main(int argc, char* argv[])
 					pos < nRainbowChainLen - 1;
 					++pos)
 				{
+					// Record the current candidate before hashing
+					if (coverageEnabled)
+					{
+						coverageMasks[tid]->mark(cwc.GetIndex());
+					}
+
 					cwc.IndexToPlain();
 					cwc.PlainToHash();
 					cwc.HashToIndex(pos);
+				}
+
+				// Record the final chain endpoint
+				if (coverageEnabled)
+				{
+					coverageMasks[tid]->mark(cwc.GetIndex());
 				}
 
 				records[slot].end = cwc.GetIndex();
@@ -385,7 +441,7 @@ int main(int argc, char* argv[])
 		threads.reserve(threadCount);
 
 		for (int t = 0; t < threadCount; ++t)
-			threads.emplace_back(worker);
+			threads.emplace_back(worker,t);
 
 		for (auto& t : threads)
 			t.join();
@@ -418,8 +474,61 @@ int main(int argc, char* argv[])
 	}
 
 	printf("\n");
+
+	// Compute and save coverage statistics
+	if (coverageEnabled)
+	{
+		// Create the final bitmap
+		CoverageBitmap globalCoverage(space);
+
+		// Merge all thread bitmaps
+		for (const auto& mask : coverageMasks)
+		{
+			globalCoverage.merge(*mask);
+		}
+
+		// Count distinct candidates
+		const uint64_t unique = globalCoverage.count();
+
+		// Total visited positions, including revisits
+		const uint64_t visits =
+			static_cast<uint64_t>(nRainbowChainCount) *
+			static_cast<uint64_t>(nRainbowChainLen);
+
+		const uint64_t revisits = visits - unique;
+
+		// Save the bitmap alongside the rainbow table
+		const std::string coveragePath =
+			std::string(szFileName) + ".coverage.bin";
+
+		if (!globalCoverage.save(coveragePath))
+		{
+			fprintf(stderr, "Failed to save coverage bitmap\n");
+			fclose(file);
+			return 1;
+		}
+
+		// Display statistics
+		printf("\n=== COVERAGE STATISTICS ===\n");
+
+		printf("Total positions : %llu\n",
+			static_cast<unsigned long long>(visits));
+
+		printf("Unique candidates : %llu\n",
+			static_cast<unsigned long long>(unique));
+
+		printf("Revisits : %llu\n",
+			static_cast<unsigned long long>(revisits));
+
+		printf("Coverage : %.6f%%\n",
+			100.0 * static_cast<double>(unique) /
+			static_cast<double>(space));
+	}
+
 	// Close
 	fclose(file);
+
+	return 0;
 
 	return 0;
 }
